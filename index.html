@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>USPTO Attorney Checker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#1e40af',
+                        secondary: '#7c3aed'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .animate-spin {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .5; }
+        }
+        .animate-pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 min-h-screen">
+    <div id="root"></div>
+    
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // FIXED Google Apps Script code - Correctly detects attorney
+        const APPS_SCRIPT_CODE = `function doGet(e) {
+  var serialNumber = e.parameter.serial;
+  
+  if (!serialNumber) {
+    return ContentService.createTextOutput(JSON.stringify({ 
+      success: true, 
+      message: "Connected!" 
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+  
+  try {
+    var result = checkAttorneyStatus(serialNumber);
+    return ContentService.createTextOutput(JSON.stringify(result))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({
+      success: false,
+      serialNumber: serialNumber,
+      error: error.toString()
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function checkAttorneyStatus(serialNumber) {
+  try {
+    var xmlUrl = "https://tsdr.uspto.gov/documentparser/" + serialNumber;
+    var response = UrlFetchApp.fetch(xmlUrl, { 
+      muteHttpExceptions: true,
+      followRedirects: true
+    });
+    var content = response.getContentText();
+    
+    // CHECK 1: Look for attorney name in XML tag <ns2:attrneyNm>
+    var pattern1 = /<ns2:attrneyNm>([^<]+)<\\/ns2:attrneyNm>/;
+    var match1 = content.match(pattern1);
+    if (match1 && match1[1] && match1[1].trim().length > 0) {
+      return {
+        success: true,
+        serialNumber: serialNumber,
+        hasAttorney: true,
+        attorneyName: match1[1].trim()
+      };
+    }
+    
+    // CHECK 2: Look for attorney name in XML tag <attrneyNm>
+    var pattern2 = /<attrneyNm>([^<]+)<\\/attrneyNm>/;
+    var match2 = content.match(pattern2);
+    if (match2 && match2[1] && match2[1].trim().length > 0) {
+      return {
+        success: true,
+        serialNumber: serialNumber,
+        hasAttorney: true,
+        attorneyName: match2[1].trim()
+      };
+    }
+    
+    // CHECK 3: Look for attorney email in XML (if email exists, attorney exists)
+    var pattern3 = /<ns2:attrneyPrimaryEmailAddr>([^<]+)<\\/ns2:attrneyPrimaryEmailAddr>/;
+    var match3 = content.match(pattern3);
+    if (match3 && match3[1] && match3[1].trim().length > 0) {
+      return {
+        success: true,
+        serialNumber: serialNumber,
+        hasAttorney: true,
+        attorneyName: "Attorney Listed"
+      };
+    }
+    
+    // CHECK 4: Look for attorney email without namespace
+    var pattern4 = /<attrneyPrimaryEmailAddr>([^<]+)<\\/attrneyPrimaryEmailAddr>/;
+    var match4 = content.match(pattern4);
+    if (match4 && match4[1] && match4[1].trim().length > 0) {
+      return {
+        success: true,
+        serialNumber: serialNumber,
+        hasAttorney: true,
+        attorneyName: "Attorney Listed"
+      };
+    }
+    
+    // If no attorney tags found with content, no attorney
+    return {
+      success: true,
+      serialNumber: serialNumber,
+      hasAttorney: false,
+      attorneyName: ""
+    };
+    
+  } catch (e) {
+    return {
+      success: false,
+      serialNumber: serialNumber,
+      error: e.toString()
+    };
+  }
+}
+
+function doPost(e) {
+  return doGet(e);
+}
+
+function testSerial() {
+  var result1 = checkAttorneyStatus("99605290");
+  Logger.log("99605290: " + JSON.stringify(result1));
+  var result2 = checkAttorneyStatus("99606329");
+  Logger.log("99606329: " + JSON.stringify(result2));
+}`;
+
+        function App() {
+            const [step, setStep] = useState(1);
+            const [scriptUrl, setScriptUrl] = useState('');
+            const [isConnected, setIsConnected] = useState(false);
+            const [isTesting, setIsTesting] = useState(false);
+            const [serialNumbers, setSerialNumbers] = useState('');
+            const [results, setResults] = useState([]);
+            const [isChecking, setIsChecking] = useState(false);
+            const [progress, setProgress] = useState(0);
+            const [currentSerial, setCurrentSerial] = useState('');
+            const [showCopied, setShowCopied] = useState(false);
+            const [connectionError, setConnectionError] = useState('');
+
+            // Load saved URL from localStorage
+            useEffect(() => {
+                const savedUrl = localStorage.getItem('uspto_script_url');
+                if (savedUrl) {
+                    setScriptUrl(savedUrl);
+                }
+            }, []);
+
+            const copyCode = () => {
+                navigator.clipboard.writeText(APPS_SCRIPT_CODE);
+                setShowCopied(true);
+                setTimeout(() => setShowCopied(false), 2000);
+            };
+
+            const testConnection = async () => {
+                if (!scriptUrl) {
+                    alert('Please enter your Google Apps Script URL');
+                    return;
+                }
+
+                setIsTesting(true);
+                setConnectionError('');
+                
+                try {
+                    // Test with a known serial number
+                    const testUrl = scriptUrl + '?serial=97119270';
+                    const response = await fetch(testUrl);
+                    const data = await response.json();
+                    
+                    if (data.success !== undefined) {
+                        setIsConnected(true);
+                        localStorage.setItem('uspto_script_url', scriptUrl);
+                        setStep(2);
+                    } else {
+                        setConnectionError('Invalid response from script');
+                    }
+                } catch (error) {
+                    setConnectionError('Connection failed: ' + error.message);
+                }
+                setIsTesting(false);
+            };
+
+            const parseSerialNumbers = (input) => {
+                return input
+                    .split(/[\s,;\n]+/)
+                    .map(s => s.trim().replace(/\D/g, ''))
+                    .filter(s => s.length >= 7 && s.length <= 8);
+            };
+
+            const checkAttorneys = async () => {
+                const serials = parseSerialNumbers(serialNumbers);
+                if (serials.length === 0) {
+                    alert('Please enter valid serial numbers');
+                    return;
+                }
+
+                setIsChecking(true);
+                setResults([]);
+                setProgress(0);
+
+                const newResults = [];
+
+                for (let i = 0; i < serials.length; i++) {
+                    const serial = serials[i];
+                    setCurrentSerial(serial);
+                    setProgress(((i + 1) / serials.length) * 100);
+
+                    try {
+                        const response = await fetch(`${scriptUrl}?serial=${serial}`);
+                        const data = await response.json();
+
+                        newResults.push({
+                            serialNumber: serial,
+                            hasAttorney: data.hasAttorney || false,
+                            attorneyName: data.attorneyName || null,
+                            error: data.error || null
+                        });
+                    } catch (error) {
+                        newResults.push({
+                            serialNumber: serial,
+                            hasAttorney: false,
+                            attorneyName: null,
+                            error: error.message
+                        });
+                    }
+
+                    setResults([...newResults]);
+                    
+                    // Small delay between requests
+                    if (i < serials.length - 1) {
+                        await new Promise(r => setTimeout(r, 500));
+                    }
+                }
+
+                setIsChecking(false);
+                setCurrentSerial('');
+            };
+
+            const exportCSV = (onlyNoAttorney = false) => {
+                let dataToExport = results;
+                if (onlyNoAttorney) {
+                    dataToExport = results.filter(r => !r.hasAttorney && !r.error);
+                }
+
+                if (dataToExport.length === 0) {
+                    alert('No data to export');
+                    return;
+                }
+
+                const headers = ['Serial Number', 'Has Attorney', 'Attorney Name', 'TSDR Link'];
+                const rows = dataToExport.map(r => [
+                    r.serialNumber,
+                    r.hasAttorney ? 'Yes' : 'No',
+                    r.attorneyName || 'N/A',
+                    `https://tsdr.uspto.gov/caseviewer/status/${r.serialNumber}`
+                ]);
+
+                const csvContent = [headers, ...rows].map(row => row.join(',')).join('\n');
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                
+                const link = document.createElement('a');
+                link.setAttribute('href', url);
+                link.setAttribute('download', onlyNoAttorney ? 'no-attorney-applications.csv' : 'all-applications.csv');
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                setTimeout(() => URL.revokeObjectURL(url), 100);
+            };
+
+            const withAttorney = results.filter(r => r.hasAttorney && !r.error);
+            const withoutAttorney = results.filter(r => !r.hasAttorney && !r.error);
+            const errors = results.filter(r => r.error);
+
+            return (
+                <div className="min-h-screen bg-gray-900 text-white p-6">
+                    <div className="max-w-4xl mx-auto">
+                        {/* Header */}
+                        <div className="text-center mb-8">
+                            <h1 className="text-4xl font-bold text-blue-400 mb-2">USPTO Attorney Checker</h1>
+                            <p className="text-gray-400">Check if trademark applications have attorneys listed on TSDR</p>
+                        </div>
+
+                        {/* Step 1: Setup */}
+                        {step === 1 && (
+                            <div className="bg-gray-800 rounded-xl p-6 mb-6">
+                                <h2 className="text-2xl font-bold text-yellow-400 mb-4">⚙️ One-Time Setup</h2>
+                                
+                                <div className="space-y-4">
+                                    <div className="bg-gray-700 rounded-lg p-4">
+                                        <h3 className="font-bold text-blue-300 mb-2">Step 1: Create Google Apps Script</h3>
+                                        <ol className="list-decimal list-inside text-gray-300 space-y-1 text-sm">
+                                            <li>Go to <a href="https://script.google.com" target="_blank" className="text-blue-400 underline">script.google.com</a></li>
+                                            <li>Click "New Project"</li>
+                                            <li>Delete any existing code</li>
+                                            <li>Click the button below to copy the code, then paste it</li>
+                                        </ol>
+                                        <button
+                                            onClick={copyCode}
+                                            className="mt-3 bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg font-medium"
+                                        >
+                                            {showCopied ? '✅ Copied!' : '📋 Copy Code'}
+                                        </button>
+                                    </div>
+
+                                    <div className="bg-gray-700 rounded-lg p-4">
+                                        <h3 className="font-bold text-blue-300 mb-2">Step 2: Deploy the Script</h3>
+                                        <ol className="list-decimal list-inside text-gray-300 space-y-1 text-sm">
+                                            <li>Click "Deploy" → "New deployment"</li>
+                                            <li>Click ⚙️ gear icon → Select "Web app"</li>
+                                            <li><strong className="text-yellow-400">Set "Who has access" to "Anyone"</strong></li>
+                                            <li>Click "Deploy" and authorize</li>
+                                            <li>Copy the Web App URL</li>
+                                        </ol>
+                                    </div>
+
+                                    <div className="bg-gray-700 rounded-lg p-4">
+                                        <h3 className="font-bold text-blue-300 mb-2">Step 3: Paste URL & Connect</h3>
+                                        <input
+                                            type="text"
+                                            value={scriptUrl}
+                                            onChange={(e) => setScriptUrl(e.target.value)}
+                                            placeholder="Paste your Google Apps Script URL here..."
+                                            className="w-full p-3 bg-gray-600 rounded-lg text-white mb-3"
+                                        />
+                                        {connectionError && (
+                                            <div className="text-red-400 text-sm mb-3 p-2 bg-red-900/30 rounded">
+                                                ❌ {connectionError}
+                                            </div>
+                                        )}
+                                        <button
+                                            onClick={testConnection}
+                                            disabled={isTesting}
+                                            className="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg font-medium disabled:opacity-50"
+                                        >
+                                            {isTesting ? '⏳ Testing...' : '🔗 Test Connection'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Step 2: Check Applications */}
+                        {step === 2 && (
+                            <>
+                                {/* Connection Status */}
+                                <div className="flex items-center justify-between mb-4">
+                                    <span className="text-green-400 flex items-center gap-2">
+                                        <span className="w-3 h-3 bg-green-400 rounded-full"></span>
+                                        Connected
+                                    </span>
+                                    <button
+                                        onClick={() => setStep(1)}
+                                        className="text-gray-400 hover:text-white text-sm"
+                                    >
+                                        ⚙️ Change Script URL
+                                    </button>
+                                </div>
+
+                                {/* Input */}
+                                <div className="bg-gray-800 rounded-xl p-6 mb-6">
+                                    <h2 className="text-xl font-bold mb-4">Enter Serial Numbers</h2>
+                                    <textarea
+                                        value={serialNumbers}
+                                        onChange={(e) => setSerialNumbers(e.target.value)}
+                                        placeholder="Enter serial numbers (comma, space, or newline separated)&#10;Example: 97123456, 97234567, 97345678"
+                                        className="w-full h-32 p-4 bg-gray-700 rounded-lg text-white resize-none"
+                                    />
+                                    <div className="flex gap-4 mt-4">
+                                        <button
+                                            onClick={checkAttorneys}
+                                            disabled={isChecking || !serialNumbers.trim()}
+                                            className="bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg font-bold disabled:opacity-50"
+                                        >
+                                            {isChecking ? '⏳ Checking...' : '🔍 Check Attorney Status'}
+                                        </button>
+                                        {results.length > 0 && (
+                                            <button
+                                                onClick={() => setResults([])}
+                                                className="bg-gray-600 hover:bg-gray-700 px-4 py-3 rounded-lg"
+                                            >
+                                                Clear Results
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Progress */}
+                                {isChecking && (
+                                    <div className="bg-gray-800 rounded-xl p-6 mb-6">
+                                        <div className="flex justify-between mb-2">
+                                            <span>Checking: {currentSerial}</span>
+                                            <span>{Math.round(progress)}%</span>
+                                        </div>
+                                        <div className="w-full bg-gray-700 rounded-full h-3">
+                                            <div
+                                                className="bg-blue-500 h-3 rounded-full transition-all"
+                                                style={{ width: `${progress}%` }}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Results */}
+                                {results.length > 0 && (
+                                    <>
+                                        {/* Stats */}
+                                        <div className="grid grid-cols-3 gap-4 mb-6">
+                                            <div className="bg-green-900/30 border border-green-500 rounded-xl p-4 text-center">
+                                                <div className="text-3xl font-bold text-green-400">{withAttorney.length}</div>
+                                                <div className="text-green-300">With Attorney</div>
+                                            </div>
+                                            <div className="bg-yellow-900/30 border border-yellow-500 rounded-xl p-4 text-center">
+                                                <div className="text-3xl font-bold text-yellow-400">{withoutAttorney.length}</div>
+                                                <div className="text-yellow-300">No Attorney</div>
+                                            </div>
+                                            <div className="bg-red-900/30 border border-red-500 rounded-xl p-4 text-center">
+                                                <div className="text-3xl font-bold text-red-400">{errors.length}</div>
+                                                <div className="text-red-300">Errors</div>
+                                            </div>
+                                        </div>
+
+                                        {/* Export Buttons */}
+                                        <div className="flex gap-4 mb-6">
+                                            <button
+                                                onClick={() => exportCSV(true)}
+                                                className="bg-yellow-600 hover:bg-yellow-700 px-6 py-3 rounded-lg font-bold"
+                                            >
+                                                ⬇️ Export No-Attorney List (CSV)
+                                            </button>
+                                            <button
+                                                onClick={() => exportCSV(false)}
+                                                className="bg-gray-600 hover:bg-gray-700 px-6 py-3 rounded-lg"
+                                            >
+                                                ⬇️ Export All Results
+                                            </button>
+                                        </div>
+
+                                        {/* No Attorney List */}
+                                        {withoutAttorney.length > 0 && (
+                                            <div className="bg-yellow-900/20 border border-yellow-500 rounded-xl p-6 mb-6">
+                                                <h3 className="text-xl font-bold text-yellow-400 mb-4">
+                                                    ⚠️ Applications WITHOUT Attorney ({withoutAttorney.length})
+                                                </h3>
+                                                <div className="space-y-2">
+                                                    {withoutAttorney.map((r, i) => (
+                                                        <div key={i} className="flex justify-between items-center bg-gray-800 p-3 rounded-lg">
+                                                            <span className="font-mono">{r.serialNumber}</span>
+                                                            <a
+                                                                href={`https://tsdr.uspto.gov/caseviewer/status/${r.serialNumber}`}
+                                                                target="_blank"
+                                                                className="text-blue-400 hover:text-blue-300"
+                                                            >
+                                                                View TSDR →
+                                                            </a>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* With Attorney List */}
+                                        {withAttorney.length > 0 && (
+                                            <div className="bg-green-900/20 border border-green-500 rounded-xl p-6 mb-6">
+                                                <h3 className="text-xl font-bold text-green-400 mb-4">
+                                                    ✅ Applications WITH Attorney ({withAttorney.length})
+                                                </h3>
+                                                <div className="space-y-2">
+                                                    {withAttorney.map((r, i) => (
+                                                        <div key={i} className="flex justify-between items-center bg-gray-800 p-3 rounded-lg">
+                                                            <div>
+                                                                <span className="font-mono">{r.serialNumber}</span>
+                                                                {r.attorneyName && (
+                                                                    <span className="text-green-300 ml-3">— {r.attorneyName}</span>
+                                                                )}
+                                                            </div>
+                                                            <a
+                                                                href={`https://tsdr.uspto.gov/caseviewer/status/${r.serialNumber}`}
+                                                                target="_blank"
+                                                                className="text-blue-400 hover:text-blue-300"
+                                                            >
+                                                                View TSDR →
+                                                            </a>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Errors */}
+                                        {errors.length > 0 && (
+                                            <div className="bg-red-900/20 border border-red-500 rounded-xl p-6">
+                                                <h3 className="text-xl font-bold text-red-400 mb-4">
+                                                    ❌ Errors ({errors.length})
+                                                </h3>
+                                                <div className="space-y-2">
+                                                    {errors.map((r, i) => (
+                                                        <div key={i} className="flex justify-between items-center bg-gray-800 p-3 rounded-lg">
+                                                            <span className="font-mono">{r.serialNumber}</span>
+                                                            <span className="text-red-400 text-sm">{r.error}</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+                            </>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
